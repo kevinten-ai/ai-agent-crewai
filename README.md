@@ -172,6 +172,125 @@ uv add crewai-tools
 
 ---
 
+## 实战案例：用 CrewAI 改造 Meeting Agent
+
+> 基于 [ava-agent/meeting-agent](https://github.com/ava-agent/meeting-agent) — 一站式 AI 会议策划平台
+
+### 现状问题
+
+meeting-agent 有 4 个 AI 角色（议程、演讲稿、海报、伴手礼），但它们**完全独立运行、互不感知**：
+
+```
+现状：4 个独立 LLM 调用 → Promise.all() 并行 → 各自输出，风格不统一
+```
+
+### CrewAI 改造方案
+
+<p align="center">
+  <img src="assets/case-meeting.png" alt="Meeting Agent CrewAI Architecture" width="560" />
+</p>
+
+用 CrewAI 将 4 个独立角色重构为**协作式 Crew**，Agent 之间共享上下文、链式传递输出：
+
+```yaml
+# agents.yaml
+agenda_planner:
+  role: "会议策划专家"
+  goal: "根据会议信息生成结构化议程，包含时间块、议题和负责人"
+  backstory: "你是一位拥有10年大型会议策划经验的专家..."
+
+speech_writer:
+  role: "演讲稿撰写专家"
+  goal: "根据议程内容撰写开场白和主题演讲稿"
+  backstory: "你是一位资深演讲稿撰写者，擅长根据议程上下文创作..."
+
+poster_designer:
+  role: "平面设计师"
+  goal: "根据议程和演讲主题输出海报设计方案（配色、布局、文案）"
+  backstory: "你是一位创意设计师，能从会议内容中提炼视觉主题..."
+
+gift_consultant:
+  role: "活动策划顾问"
+  goal: "根据会议类型、预算和参会人群推荐伴手礼方案"
+  backstory: "你是一位活动策划顾问，熟悉各类商务礼品..."
+
+qa_reviewer:
+  role: "质量审核专家"
+  goal: "审核所有输出的一致性、专业性和完整性"
+  backstory: "你是一位严谨的质量审核员..."
+```
+
+```yaml
+# tasks.yaml — 链式依赖，上游输出自动注入下游
+agenda_task:
+  description: "为 {meeting_type} 生成详细议程：{title}，{duration}，{attendees}人参会"
+  expected_output: "结构化议程表，含时间、议题、负责人、形式"
+  agent: agenda_planner
+
+speech_task:
+  description: "根据以上议程，撰写开场致辞和主旨演讲稿"
+  expected_output: "完整演讲稿，markdown 格式，含时长标注"
+  agent: speech_writer
+  context: [agenda_task]          # 引用议程输出
+
+poster_task:
+  description: "根据议程和演讲主题，输出海报设计方案"
+  expected_output: "设计brief：主题、配色方案、布局描述、核心文案"
+  agent: poster_designer
+  context: [agenda_task, speech_task]  # 引用议程+演讲
+
+gift_task:
+  description: "根据会议类型和预算 {budget}，推荐伴手礼方案"
+  expected_output: "3套方案：经济/标准/精品，含品名、单价、总预算"
+  agent: gift_consultant
+
+review_task:
+  description: "审核以上所有输出，检查一致性和完整性"
+  expected_output: "审核报告：通过/需修改，附具体修改建议"
+  agent: qa_reviewer
+  context: [agenda_task, speech_task, poster_task, gift_task]
+```
+
+### 改造前 vs 改造后
+
+| 维度 | 改造前 | CrewAI 改造后 |
+|------|--------|-------------|
+| Agent 间依赖 | 零，各自独立 | 链式：议程→演讲→海报→伴手礼→审核 |
+| 输出一致性 | 风格可能不一致 | 共享 context，风格统一 |
+| 质量保障 | 无 | QA Agent 审核，不合格则重新生成 |
+| 流程适配 | 固定流程 | Flow 按会议类型（年会/技术分享/发布会）走不同路径 |
+| 可扩展性 | 加角色需改代码 | YAML 加配置即可 |
+
+### 用 Flow 编排不同会议类型
+
+```python
+from crewai.flow.flow import Flow, start, listen, router
+
+class MeetingFlow(Flow):
+    @start()
+    def classify_meeting(self):
+        """识别会议类型"""
+        return classify(self.state.meeting_data)
+
+    @router(classify_meeting)
+    def route_by_type(self, meeting_type):
+        if meeting_type == "annual_gala":
+            return "full_planning"        # 年会：全套 5 Agent
+        elif meeting_type == "tech_talk":
+            return "light_planning"       # 技术分享：议程+演讲 2 Agent
+        return "standard_planning"
+
+    @listen("full_planning")
+    def run_full_crew(self):
+        return FullMeetingCrew().crew().kickoff(inputs=self.state.meeting_data)
+
+    @listen("light_planning")
+    def run_light_crew(self):
+        return LightMeetingCrew().crew().kickoff(inputs=self.state.meeting_data)
+```
+
+---
+
 ## 常用 CLI 命令
 
 | 命令 | 说明 |
